@@ -25,8 +25,11 @@ Ukrainian: «бочка» / «керована бочка».
 sim_vehicle.py -v ArduPlane -f plane-3d --console --map
 
 # watching the maneuver: RealFlight over FlightAxis (Windows host)
-sim_vehicle.py -v ArduPlane -f flightaxis:<windows-ip> --console
+./sim_realflight.sh
 ```
+
+`sim_realflight.sh` resolves the Windows host IP from the default route and warns if the
+FlightAxis port is closed. Don't hardcode the IP — see below.
 
 Trigger the command from MAVProxy:
 
@@ -35,6 +38,57 @@ long 31000 <maneuver> <direction> <reps> <rate> 0 0 0
 ```
 
 Wipe persisted params when experiments start behaving oddly: `sim_vehicle.py -w`.
+
+## Simulation setup — done
+
+**RealFlight Evolution over FlightAxis is set up, flown, and confirmed working.** Extra
+300L, hand-flown in ACRO with a RadioMaster TX12. These are settled — don't re-derive
+them, and don't re-litigate the simulator choice.
+
+### Host link
+
+WSL2 is NAT'd: the Windows host is the default gateway, and **the address changes on
+every Windows reboot**. `sim_realflight.sh` derives it each run. SITL connects outbound to
+TCP **18083**; Windows Firewall needs one inbound rule allowing that port from the WSL
+subnet.
+
+### RealFlight Evolution settings
+
+Evolution has no top menu bar — everything is under **Esc**.
+
+- **Settings → Physics → Quality** — enable **RealFlight Link**
+- **Settings → Physics** — *Pause Sim When in Background* = **No**, *Pauses Sim when in
+  Menu* = **No**. Either left at Yes stalls SITL the moment you type in MAVProxy, which
+  reads as a hang.
+- **Settings → Physics** — *Automatic Reset Delay (sec)* = **2.0**, so the final `AERO:`
+  state text is readable before the sim snaps back to the runway.
+- Restart RealFlight after changing these; the Link server only comes up on start.
+
+### Transmitter
+
+TX12 plugs into **Windows** in USB Joystick (HID) mode — not passed through to WSL.
+RealFlight reads the sticks and forwards them to SITL as `rcin`
+([`SIM_FlightAxis.cpp`](libraries/SITL/SIM_FlightAxis.cpp), 12 channels). Calibrate in
+RealFlight, channel order AETR.
+
+### Parameters the FlightAxis backend gets wrong
+
+`sim_defaults[]` in `SIM_FlightAxis.cpp` is plumbing only (RC/servo ranges, EKF type,
+accel offsets) — no airframe tuning at all. The `flightaxis:` frame inherits the bare
+ArduPlane entry in `Tools/autotest/pysim/vehicleinfo.py`. Two fixes that are not optional:
+
+- `RC2_REVERSED` is force-set to 1 for the RealFlight InterLink. Wrong for a TX12 —
+  set it to **0** after verifying pitch direction with `rc guiin`. It persists to EEPROM.
+- `ARSPD_USE` defaults to **0**, so airspeed is measured but unused. Set it to **1**.
+  See the entry envelope section — the airspeed gate is meaningless without it.
+
+Run `AUTOTUNE` (mode 8) before trusting ACRO rate tracking; stock gains do not fly the
+Extra 300L well.
+
+### Gotchas
+
+- First FlightAxis run needs `-w` — the backend saves its own defaults to EEPROM and they
+  collide with leftovers from `plane-3d` runs.
 
 ## The MAVLink command
 
@@ -96,6 +150,9 @@ Checked once, at command time; failure returns `MAV_RESULT_FAILED`.
 
 The altitude and airspeed conditions are also checked continuously during the maneuver,
 where they are abort triggers rather than rejections.
+
+The airspeed gate requires `ARSPD_USE 1` in SITL — otherwise `airspeed_estimate()` returns
+a throttle-and-attitude guess and the gate passes or fails for unrelated reasons.
 
 ## Parameters
 
