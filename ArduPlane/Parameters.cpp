@@ -1279,6 +1279,12 @@ const AP_Param::GroupInfo ParametersG2::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("GUIDED_TIMEOUT", 40, ParametersG2, guided_timeout, 3.0f),
 
+#if AP_AEROBATICS_ENABLED
+    // @Group: AEROB_
+    // @Path: ../libraries/AP_Aerobatics/AP_Aerobatics.cpp
+    AP_SUBGROUPINFO(aerobatics, "AEROB_", 41, ParametersG2, AP_Aerobatics),
+#endif
+
     AP_GROUPEND
 };
 

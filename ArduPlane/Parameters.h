@@ -3,6 +3,7 @@
 #define AP_PARAM_VEHICLE_NAME plane
 
 #include <AP_Common/AP_Common.h>
+#include <AP_Aerobatics/AP_Aerobatics.h>
 
 // Global parameter class.
 //
@@ -594,6 +595,10 @@ public:
 
 #if AP_PLANE_SYSTEMID_ENABLED
     AP_SystemID systemid;
+#endif
+
+#if AP_AEROBATICS_ENABLED
+    AP_Aerobatics aerobatics;
 #endif
 };
 
