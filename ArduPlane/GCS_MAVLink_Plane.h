@@ -1,6 +1,7 @@
 #pragma once
 
 #include <GCS_MAVLink/GCS.h>
+#include <AP_Aerobatics/AP_Aerobatics_config.h>
 #include <AP_Logger/AP_Logger.h>
 #include <AP_Airspeed/AP_Airspeed_config.h>
 #include "quadplane.h"
@@ -59,6 +60,10 @@ private:
     MAV_RESULT handle_command_int_DO_CHANGE_ALTITUDE(const mavlink_command_int_t &packet);
     MAV_RESULT handle_command_int_guided_slew_commands(const mavlink_command_int_t &packet);
     MAV_RESULT handle_MAV_CMD_DO_AUTOTUNE_ENABLE(const mavlink_command_int_t &packet);
+
+#if AP_AEROBATICS_ENABLED
+    MAV_RESULT handle_command_aerobatic_maneuver(const mavlink_command_int_t &packet);
+#endif
     MAV_RESULT handle_command_DO_CHANGE_SPEED(const mavlink_command_int_t &packet);
     MAV_RESULT handle_MAV_CMD_DO_MOTOR_TEST(const mavlink_command_int_t &packet);
     MAV_RESULT handle_MAV_CMD_DO_PARACHUTE(const mavlink_command_int_t &packet);

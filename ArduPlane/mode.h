@@ -250,6 +250,7 @@ protected:
     } acro_state;
 
     bool _enter() override;
+    void _exit() override;
 };
 
 class ModeAuto : public Mode

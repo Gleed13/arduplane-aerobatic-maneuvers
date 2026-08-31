@@ -753,12 +753,63 @@ MAV_RESULT GCS_MAVLINK_Plane::handle_command_int_guided_slew_commands(const mavl
 }
 #endif // AP_PLANE_OFFBOARD_GUIDED_SLEW_ENABLED
 
+#if AP_AEROBATICS_ENABLED
+/*
+  handle MAV_CMD_AEROBATIC_MANEUVER. Runs only in ACRO; mode and arming
+  are checked here because they are vehicle state, everything else is
+  checked by the library.
+ */
+MAV_RESULT GCS_MAVLINK_Plane::handle_command_aerobatic_maneuver(const mavlink_command_int_t &packet)
+{
+    if (!plane.arming.is_armed()) {
+        return MAV_RESULT_DENIED;
+    }
+
+    if (plane.control_mode != &plane.mode_acro) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "AERO: ACRO mode required");
+        return MAV_RESULT_TEMPORARILY_REJECTED;
+    }
+
+    AP_Aerobatics::VehicleState vs;
+    vs.alt_agl = plane.relative_ground_altitude(RangeFinderUse::NONE);
+    vs.airspeed_valid = plane.ahrs.airspeed_EAS(vs.airspeed);
+    vs.is_flying = plane.is_flying();
+
+    const AP_Aerobatics::Maneuver m = AP_Aerobatics::Maneuver(uint8_t(packet.param1));
+
+    switch (plane.g2.aerobatics.start(m, packet.param2, packet.param3, packet.param4, vs)) {
+
+    case AP_Aerobatics::StartResult::OK:
+        return MAV_RESULT_ACCEPTED;
+
+    case AP_Aerobatics::StartResult::ALREADY_RUNNING:
+        gcs().send_text(MAV_SEVERITY_WARNING, "AERO: already running");
+        return MAV_RESULT_TEMPORARILY_REJECTED;
+
+    case AP_Aerobatics::StartResult::BAD_MANEUVER:
+        gcs().send_text(MAV_SEVERITY_WARNING, "AERO: unknown maneuver %u", unsigned(m));
+        return MAV_RESULT_UNSUPPORTED;
+
+    case AP_Aerobatics::StartResult::ENVELOPE:
+        gcs().send_text(MAV_SEVERITY_WARNING, "AERO: entry envelope");
+        return MAV_RESULT_FAILED;
+    }
+
+    return MAV_RESULT_FAILED;
+}
+#endif // AP_AEROBATICS_ENABLED
+
 MAV_RESULT GCS_MAVLINK_Plane::handle_command_int_packet(const mavlink_command_int_t &packet, const mavlink_message_t &msg)
 {
     switch(packet.command) {
 
     case MAV_CMD_DO_AUTOTUNE_ENABLE:
         return handle_MAV_CMD_DO_AUTOTUNE_ENABLE(packet);
+
+#if AP_AEROBATICS_ENABLED
+    case MAV_CMD_AEROBATIC_MANEUVER:
+        return handle_command_aerobatic_maneuver(packet);
+#endif
 
     case MAV_CMD_DO_REPOSITION:
         return handle_command_int_do_reposition(packet);

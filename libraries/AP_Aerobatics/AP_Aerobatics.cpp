@@ -6,6 +6,18 @@
 
 #if AP_AEROBATICS_ENABLED
 
+#include <AP_AHRS/AP_AHRS.h>
+#include <AP_Math/AP_Math.h>
+#include <GCS_MAVLink/GCS.h>
+
+// clamps on the commanded roll rate, whether it comes from param4 or
+// from AEROB_RATE
+#define AEROBATICS_RATE_MIN          30.0   // deg/s
+#define AEROBATICS_RATE_MAX         360.0   // deg/s
+
+// most repetitions we will accept in one command
+#define AEROBATICS_REPS_MAX             5
+
 // defaults chosen for the Extra 300L in RealFlight; all three exist so
 // they can be tuned in flight without a rebuild
 #define AEROBATICS_RATE_DEFAULT     180.0   // deg/s
@@ -40,6 +52,73 @@ const AP_Param::GroupInfo AP_Aerobatics::var_info[] = {
 
     AP_GROUPEND
 };
+
+AP_Aerobatics::StartResult AP_Aerobatics::start(Maneuver m, float direction, float reps,
+                                                float rate_dps, const VehicleState &vs)
+{
+    if (active()) {
+        return StartResult::ALREADY_RUNNING;
+    }
+
+    // only the aileron roll is implemented; the loop is a stretch goal
+    if (m != Maneuver::AILERON_ROLL) {
+        return StartResult::BAD_MANEUVER;
+    }
+
+    if (!check_envelope(vs)) {
+        return StartResult::ENVELOPE;
+    }
+
+    current.maneuver = m;
+    current.direction = is_negative(direction) ? -1.0 : 1.0;
+
+    // zero repetitions is taken as one, so "long 31010 1 1 0 0 ..." does
+    // something sensible rather than nothing
+    const float r = is_positive(reps) ? reps : 1.0;
+    current.reps = constrain_int16(int16_t(r), 1, AEROBATICS_REPS_MAX);
+
+    // param4 of zero means "use AEROB_RATE"
+    const float requested = is_positive(rate_dps) ? rate_dps : rate.get();
+    current.rate_dps = constrain_float(requested, AEROBATICS_RATE_MIN, AEROBATICS_RATE_MAX);
+
+    set_state(State::ENTRY);
+
+    gcs().send_text(MAV_SEVERITY_INFO, "AERO: roll %s x%u at %.0f deg/s",
+                    is_negative(current.direction) ? "left" : "right",
+                    unsigned(current.reps), double(current.rate_dps));
+
+    return StartResult::OK;
+}
+
+void AP_Aerobatics::reset(void)
+{
+    if (state != State::IDLE) {
+        set_state(State::IDLE);
+    }
+}
+
+/*
+  entry envelope. Checked once, at command time.
+
+  TODO(stage 3): airspeed above 1.3 * ARSPD_FBW_MIN, altitude above
+  AEROB_ALT_MIN, roll and pitch within ~20 deg of level, armed and
+  flying. Accepts everything for now so the command plumbing can be
+  tested on its own.
+ */
+bool AP_Aerobatics::check_envelope(const VehicleState &vs) const
+{
+    (void)vs;
+    return true;
+}
+
+void AP_Aerobatics::set_state(State s)
+{
+    if (s == state) {
+        return;
+    }
+    state = s;
+    gcs().send_text(MAV_SEVERITY_INFO, "AERO: %s", state_name(s));
+}
 
 const char *AP_Aerobatics::state_name(State s)
 {

@@ -6,7 +6,20 @@ bool ModeAcro::_enter()
     acro_state.locked_roll = false;
     acro_state.locked_pitch = false;
     IGNORE_RETURN(ahrs.get_quaternion(acro_state.q));
+
+#if AP_AEROBATICS_ENABLED
+    // a maneuver never survives a mode change
+    plane.g2.aerobatics.reset();
+#endif
+
     return true;
+}
+
+void ModeAcro::_exit()
+{
+#if AP_AEROBATICS_ENABLED
+    plane.g2.aerobatics.reset();
+#endif
 }
 
 void ModeAcro::update()

@@ -1,15 +1,19 @@
 #pragma once
 
-#include <AP_HAL/AP_HAL_Boards.h>
-
-#ifndef AP_AEROBATICS_ENABLED
-#define AP_AEROBATICS_ENABLED 1
-#endif
+#include "AP_Aerobatics_config.h"
 
 #if AP_AEROBATICS_ENABLED
 
 #include <AP_Common/AP_Common.h>
 #include <AP_Param/AP_Param.h>
+
+/*
+  MAV_CMD_USER_1 (31010) is a reserved user-defined slot in common.xml,
+  chosen so the mavlink submodule stays untouched and stock
+  MAVProxy/pymavlink work unmodified. Not 31000 -- that is
+  MAV_CMD_WAYPOINT_USER_1, a mission command carrying a location.
+ */
+#define MAV_CMD_AEROBATIC_MANEUVER MAV_CMD_USER_1
 
 /*
   automatic aerobatic maneuvers for ArduPlane, triggered by
@@ -46,6 +50,43 @@ public:
         ABORT,
     };
 
+    // why a start request was refused. The vehicle maps these onto
+    // MAV_RESULT codes; the library does not include mavlink headers.
+    enum class StartResult : uint8_t {
+        OK = 0,
+        ALREADY_RUNNING,
+        BAD_MANEUVER,       // unknown or unimplemented maneuver ID
+        ENVELOPE,           // entry envelope check failed
+    };
+
+    /*
+      vehicle state the library cannot obtain for itself. Attitude and
+      body rates come from AP::ahrs(); these do not, so the ACRO hook
+      passes them in.
+     */
+    struct VehicleState {
+        float alt_agl;          // m above ground
+        float airspeed;         // m/s
+        bool airspeed_valid;    // false if there is no usable estimate
+        bool is_flying;
+    };
+
+    /*
+      request a maneuver. Mode and arming are checked by the caller;
+      everything else is checked here. On OK the state machine leaves
+      IDLE and the ACRO hook takes over the rate targets.
+
+      direction: negative for left, otherwise right
+      reps:      number of full rotations, zero treated as one
+      rate_dps:  commanded roll rate, zero to use AEROB_RATE
+     */
+    StartResult start(Maneuver m, float direction, float reps, float rate_dps,
+                      const VehicleState &vs);
+
+    // return to IDLE, discarding any running maneuver. Called on ACRO
+    // entry and exit so stale state never survives a mode change.
+    void reset(void);
+
     State get_state(void) const { return state; }
 
     // true while a maneuver is running and the ACRO hook should be
@@ -62,7 +103,20 @@ private:
     AP_Float pitch;     // AEROB_PITCH,   entry pitch-up target, deg
     AP_Float alt_min;   // AEROB_ALT_MIN, altitude floor AGL, m
 
+    // entry conditions, checked once at command time
+    bool check_envelope(const VehicleState &vs) const;
+
+    void set_state(State s);
+
     State state = State::IDLE;
+
+    // the running request
+    struct {
+        Maneuver maneuver;
+        float direction;    // -1 or +1
+        uint8_t reps;
+        float rate_dps;     // resolved, never zero
+    } current;
 };
 
 #endif // AP_AEROBATICS_ENABLED
