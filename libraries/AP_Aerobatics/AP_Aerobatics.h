@@ -66,8 +66,11 @@ public:
      */
     struct VehicleState {
         float alt_agl;          // m above ground
-        float airspeed;         // m/s
-        bool airspeed_valid;    // false if there is no usable estimate
+        float airspeed;         // m/s, EAS
+        float airspeed_min;     // m/s, AIRSPEED_MIN
+        // true only when airspeed comes from a real sensor. A synthetic
+        // estimate is rejected rather than trusted -- see check_envelope()
+        bool airspeed_valid;
         bool is_flying;
     };
 
@@ -103,7 +106,8 @@ private:
     AP_Float pitch;     // AEROB_PITCH,   entry pitch-up target, deg
     AP_Float alt_min;   // AEROB_ALT_MIN, altitude floor AGL, m
 
-    // entry conditions, checked once at command time
+    // entry conditions, checked once at command time. Sends the reason
+    // for a rejection to the GCS; the caller only sees pass or fail.
     bool check_envelope(const VehicleState &vs) const;
 
     void set_state(State s);

@@ -770,10 +770,17 @@ MAV_RESULT GCS_MAVLINK_Plane::handle_command_aerobatic_maneuver(const mavlink_co
         return MAV_RESULT_TEMPORARILY_REJECTED;
     }
 
-    AP_Aerobatics::VehicleState vs;
+    // zero-initialised: airspeed_EAS() leaves its argument untouched when
+    // it returns false
+    AP_Aerobatics::VehicleState vs {};
     vs.alt_agl = plane.relative_ground_altitude(RangeFinderUse::NONE);
-    vs.airspeed_valid = plane.ahrs.airspeed_EAS(vs.airspeed);
+    vs.airspeed_min = plane.aparm.airspeed_min;
     vs.is_flying = plane.is_flying();
+
+    // using_airspeed_sensor() distinguishes a real reading from a
+    // synthetic one; the library rejects the synthetic case
+    vs.airspeed_valid = plane.ahrs.airspeed_EAS(vs.airspeed) &&
+                        plane.ahrs.using_airspeed_sensor();
 
     const AP_Aerobatics::Maneuver m = AP_Aerobatics::Maneuver(uint8_t(packet.param1));
 
@@ -791,7 +798,7 @@ MAV_RESULT GCS_MAVLINK_Plane::handle_command_aerobatic_maneuver(const mavlink_co
         return MAV_RESULT_UNSUPPORTED;
 
     case AP_Aerobatics::StartResult::ENVELOPE:
-        gcs().send_text(MAV_SEVERITY_WARNING, "AERO: entry envelope");
+        // check_envelope() has already said which condition failed
         return MAV_RESULT_FAILED;
     }
 

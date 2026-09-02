@@ -174,7 +174,8 @@ drift over a 2–3 second maneuver is around a degree, which is irrelevant here.
 
 Checked once, at command time; failure returns `MAV_RESULT_FAILED`.
 
-- airspeed above roughly `1.3 × ARSPD_FBW_MIN`
+- airspeed above roughly `1.3 × AIRSPEED_MIN` (renamed from `ARSPD_FBW_MIN`; read in code
+  as `plane.aparm.airspeed_min`)
 - altitude AGL above `AEROB_ALT_MIN`
 - roll and pitch both within ~20° of level
 - armed and flying

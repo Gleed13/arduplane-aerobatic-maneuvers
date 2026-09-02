@@ -18,6 +18,11 @@
 // most repetitions we will accept in one command
 #define AEROBATICS_REPS_MAX             5
 
+// entry envelope. Margin over AIRSPEED_MIN, and how far from level the
+// aircraft may be when the command arrives.
+#define AEROBATICS_ENTRY_ASPD_RATIO   1.3
+#define AEROBATICS_ENTRY_LEVEL_DEG   20.0
+
 // defaults chosen for the Extra 300L in RealFlight; all three exist so
 // they can be tuned in flight without a rebuild
 #define AEROBATICS_RATE_DEFAULT     180.0   // deg/s
@@ -98,16 +103,56 @@ void AP_Aerobatics::reset(void)
 }
 
 /*
-  entry envelope. Checked once, at command time.
+  entry envelope. Checked once, at command time; arming and mode are the
+  caller's business. Each failure sends its own text, so a rejection in
+  MAVProxy says which condition was missed rather than just "envelope".
 
-  TODO(stage 3): airspeed above 1.3 * ARSPD_FBW_MIN, altitude above
-  AEROB_ALT_MIN, roll and pitch within ~20 deg of level, armed and
-  flying. Accepts everything for now so the command plumbing can be
-  tested on its own.
+  The altitude and airspeed conditions are checked again continuously
+  while the maneuver runs, where they abort rather than reject.
  */
 bool AP_Aerobatics::check_envelope(const VehicleState &vs) const
 {
-    (void)vs;
+    const AP_AHRS &ahrs = AP::ahrs();
+
+    if (!vs.is_flying) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "AERO: not flying");
+        return false;
+    }
+
+    if (vs.alt_agl < alt_min) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "AERO: alt %.0fm below %.0fm",
+                        double(vs.alt_agl), double(alt_min.get()));
+        return false;
+    }
+
+    /*
+      a synthetic airspeed estimate is a throttle-and-attitude guess, so
+      the gate would pass or fail for reasons that have nothing to do
+      with airspeed. Refuse rather than trust it -- this needs
+      ARSPD_USE 1, which the FlightAxis backend does not set.
+     */
+    if (!vs.airspeed_valid) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "AERO: no airspeed sensor, set ARSPD_USE 1");
+        return false;
+    }
+
+    const float airspeed_entry = AEROBATICS_ENTRY_ASPD_RATIO * vs.airspeed_min;
+    if (vs.airspeed < airspeed_entry) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "AERO: airspeed %.0f below %.0f",
+                        double(vs.airspeed), double(airspeed_entry));
+        return false;
+    }
+
+    // start from a known attitude, so the roll is about the flight path
+    // rather than whatever bank the aircraft happened to be holding
+    const float level_max = radians(AEROBATICS_ENTRY_LEVEL_DEG);
+    if (fabsf(ahrs.get_roll_rad()) > level_max || fabsf(ahrs.get_pitch_rad()) > level_max) {
+        gcs().send_text(MAV_SEVERITY_WARNING, "AERO: not level, roll=%.0f pitch=%.0f",
+                        double(degrees(ahrs.get_roll_rad())),
+                        double(degrees(ahrs.get_pitch_rad())));
+        return false;
+    }
+
     return true;
 }
 
