@@ -3,7 +3,7 @@
 Implementation plan for the automatic aileron roll. Companion to `CLAUDE.md`, which holds
 the settled design decisions; this file holds the order of work.
 
-Status: simulation setup is done and flown. Stages 1-3 landed; next is stage 4.
+Status: simulation setup is done and flown. Stages 1-4 done; next is stage 5.
 
 ## Corrections — applied
 

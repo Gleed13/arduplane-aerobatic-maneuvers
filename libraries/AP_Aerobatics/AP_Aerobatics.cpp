@@ -7,6 +7,7 @@
 #if AP_AEROBATICS_ENABLED
 
 #include <AP_AHRS/AP_AHRS.h>
+#include <AP_HAL/AP_HAL.h>
 #include <AP_Math/AP_Math.h>
 #include <GCS_MAVLink/GCS.h>
 
@@ -17,6 +18,10 @@
 
 // most repetitions we will accept in one command
 #define AEROBATICS_REPS_MAX             5
+
+// how long EXIT holds a zero rate demand before the pilot gets the
+// sticks back, so the roll is stopped rather than still turning
+#define AEROBATICS_EXIT_MS            250
 
 // entry envelope. Margin over AIRSPEED_MIN, and how far from level the
 // aircraft may be when the command arrives.
@@ -86,6 +91,7 @@ AP_Aerobatics::StartResult AP_Aerobatics::start(Maneuver m, float direction, flo
     const float requested = is_positive(rate_dps) ? rate_dps : rate.get();
     current.rate_dps = constrain_float(requested, AEROBATICS_RATE_MIN, AEROBATICS_RATE_MAX);
 
+    roll_accumulated = 0;
     set_state(State::ENTRY);
 
     gcs().send_text(MAV_SEVERITY_INFO, "AERO: roll %s x%u at %.0f deg/s",
@@ -95,8 +101,77 @@ AP_Aerobatics::StartResult AP_Aerobatics::start(Maneuver m, float direction, flo
     return StartResult::OK;
 }
 
+/*
+  one loop of the state machine. The ACRO hook calls this in place of
+  computing the pilot rate targets, and uses out only when this returns
+  true.
+ */
+bool AP_Aerobatics::update(float dt, Output &out)
+{
+    if (state == State::IDLE) {
+        return false;
+    }
+
+    /*
+      integrate the body-axis roll rate. Do NOT accumulate deltas of
+      ahrs.roll: that wraps at +-180 so passing through inverted jumps
+      the count backwards by nearly a turn and the maneuver never ends,
+      and Euler roll rate carries a tan(pitch) term that is already
+      wrong at the entry pitch and singular at 90 degrees.
+     */
+    roll_accumulated += AP::ahrs().get_gyro().x * dt;
+
+    // zero unless a state below asks for something, so a state that
+    // commands nothing hands back level rather than a stale demand
+    out.roll_rate_dps = 0;
+    out.pitch_rate_dps = 0;
+
+    switch (state) {
+
+    case State::IDLE:
+        // unreachable, handled above
+        break;
+
+    case State::ENTRY:
+        // stage 5 pitches up to AEROB_PITCH here; for now the roll
+        // starts as soon as the command is accepted
+        set_state(State::ROLLING);
+        FALLTHROUGH;
+
+    case State::ROLLING: {
+        out.roll_rate_dps = current.direction * current.rate_dps;
+        if (fabsf(roll_accumulated) >= current.reps * M_2PI) {
+            out.roll_rate_dps = 0;
+            exit_ms = AP_HAL::millis();
+            set_state(State::EXIT);
+        }
+        break;
+    }
+
+    case State::EXIT:
+        // hold the zero demand briefly: handing back mid-rotation
+        // leaves acro_locking to hold whatever bank it inherits
+        if (AP_HAL::millis() - exit_ms >= AEROBATICS_EXIT_MS) {
+            gcs().send_text(MAV_SEVERITY_INFO, "AERO: done, roll=%.0f pitch=%.0f",
+                            double(degrees(roll_accumulated)),
+                            double(degrees(AP::ahrs().get_pitch_rad())));
+            set_state(State::IDLE);
+            return false;
+        }
+        break;
+
+    case State::ABORT:
+        // stage 6 fills this in; nothing reaches it yet
+        set_state(State::IDLE);
+        return false;
+    }
+
+    return true;
+}
+
 void AP_Aerobatics::reset(void)
 {
+    roll_accumulated = 0;
     if (state != State::IDLE) {
         set_state(State::IDLE);
     }

@@ -74,6 +74,12 @@ public:
         bool is_flying;
     };
 
+    // rate targets the ACRO hook writes over the pilot's, in deg/s
+    struct Output {
+        float roll_rate_dps;
+        float pitch_rate_dps;
+    };
+
     /*
       request a maneuver. Mode and arming are checked by the caller;
       everything else is checked here. On OK the state machine leaves
@@ -85,6 +91,18 @@ public:
      */
     StartResult start(Maneuver m, float direction, float reps, float rate_dps,
                       const VehicleState &vs);
+
+    /*
+      advance the state machine by one loop. Returns true while a
+      maneuver is running, in which case out holds the rate targets the
+      ACRO hook must use in place of the pilot's; false means idle and
+      the pilot keeps the sticks.
+
+      dt is the true loop timestep -- plane.G_Dt, never a hardcoded
+      0.02: stabilize() is a FAST_TASK, so it runs at SCHED_LOOP_RATE
+      and 50Hz is only the ArduPlane default.
+     */
+    bool update(float dt, Output &out);
 
     // return to IDLE, discarding any running maneuver. Called on ACRO
     // entry and exit so stale state never survives a mode change.
@@ -113,6 +131,14 @@ private:
     void set_state(State s);
 
     State state = State::IDLE;
+
+    // body-axis roll since the maneuver started, radians, signed with
+    // the commanded direction
+    float roll_accumulated = 0;
+
+    // when EXIT began, for the settle time before the pilot gets the
+    // sticks back
+    uint32_t exit_ms = 0;
 
     // the running request
     struct {

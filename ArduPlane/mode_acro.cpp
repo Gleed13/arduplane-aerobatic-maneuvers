@@ -41,7 +41,20 @@ void ModeAcro::run()
 {
     output_pilot_throttle();
 
-    if (plane.g.acro_locking == 2 && plane.g.acro_yaw_rate > 0 &&
+    bool aerobatics_active = false;
+#if AP_AEROBATICS_ENABLED
+    /*
+      an automatic maneuver drives the rate targets in stabilize(), and
+      the quaternion path returns before ever reaching it. With
+      ACRO_LOCKING=2 and a non-zero ACRO_YAW_RATE that path is the
+      default, so it has to be short-circuited or the maneuver silently
+      does nothing.
+     */
+    aerobatics_active = plane.g2.aerobatics.active();
+#endif
+
+    if (!aerobatics_active &&
+        plane.g.acro_locking == 2 && plane.g.acro_yaw_rate > 0 &&
         plane.yawController.rate_control_enabled()) {
         // we can do 3D acro locking
         stabilize_quaternion();
@@ -64,12 +77,32 @@ void ModeAcro::stabilize()
     float roll_rate = (rexpo/SERVO_MAX) * plane.g.acro_roll_rate;
     float pitch_rate = (pexpo/SERVO_MAX) * plane.g.acro_pitch_rate;
 
+    bool aerobatics_active = false;
+#if AP_AEROBATICS_ENABLED
+    /*
+      an automatic maneuver replaces the pilot rate targets. G_Dt is the
+      real timestep: stabilize() is a FAST_TASK, so it runs at
+      SCHED_LOOP_RATE rather than a fixed 50Hz.
+     */
+    AP_Aerobatics::Output aero_out;
+    if (plane.g2.aerobatics.update(plane.G_Dt, aero_out)) {
+        roll_rate = aero_out.roll_rate_dps;
+        pitch_rate = aero_out.pitch_rate_dps;
+        aerobatics_active = true;
+    }
+#endif
+
     IGNORE_RETURN(ahrs.get_quaternion(acro_state.q));
 
     /*
       check for special roll handling near the pitch poles
      */
-    if (plane.g.acro_locking && is_zero(roll_rate)) {
+    /*
+      the locking branches are guarded by is_zero(rate), and a maneuver
+      legitimately commands a zero rate (ENTRY pitches up without
+      rolling), so locking must be bypassed on the explicit flag
+     */
+    if (!aerobatics_active && plane.g.acro_locking && is_zero(roll_rate)) {
         /*
           we have no roll stick input, so we will enter "roll locked"
           mode, and hold the roll we had when the stick was released
@@ -96,7 +129,7 @@ void ModeAcro::stabilize()
         SRV_Channels::set_output_scaled(SRV_Channel::k_aileron, plane.rollController.get_rate_out(roll_rate,  speed_scaler));
     }
 
-    if (plane.g.acro_locking && is_zero(pitch_rate)) {
+    if (!aerobatics_active && plane.g.acro_locking && is_zero(pitch_rate)) {
         /*
           user has zero pitch stick input, so we lock pitch at the
           point they release the stick
