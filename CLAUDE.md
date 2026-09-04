@@ -71,19 +71,70 @@ RealFlight reads the sticks and forwards them to SITL as `rcin`
 ([`SIM_FlightAxis.cpp`](libraries/SITL/SIM_FlightAxis.cpp), 12 channels). Calibrate in
 RealFlight, channel order AETR.
 
+**The mode switch needs moving.** ArduPlane picks the mode from PWM bands, so you get as
+many modes as the switch has *detents* — a 2-position switch reaches only positions 1 and 6.
+The default `FLTMODE_CH 8` is 2-position on this TX12, which cannot cover ACRO, AUTOTUNE and
+MANUAL. Channels 6 and 7 are 3-position (1000 / 1642 / 2000). Measured, not assumed — verify
+your own before copying:
+
+```
+param set FLTMODE_CH 6
+param set FLTMODE1 4   # ACRO      (detent 1000)
+param set FLTMODE2 4   # ACRO
+param set FLTMODE3 4   # ACRO
+param set FLTMODE4 8   # AUTOTUNE
+param set FLTMODE5 8   # AUTOTUNE  (detent 1642)
+param set FLTMODE6 0   # MANUAL    (detent 2000)
+```
+
+Positions are paired deliberately: the middle detent measures 1642, only 21 µs above the
+position 4/5 boundary at 1621, so pairing 4 and 5 means it lands on AUTOTUNE either way.
+There is a 200 ms debounce (`RC_Channel.cpp`), so a brisk flick will not catch intermediate
+bands, but a slow one can.
+
 ### Parameters the FlightAxis backend gets wrong
 
 `sim_defaults[]` in `SIM_FlightAxis.cpp` is plumbing only (RC/servo ranges, EKF type,
 accel offsets) — no airframe tuning at all. The `flightaxis:` frame inherits the bare
-ArduPlane entry in `Tools/autotest/pysim/vehicleinfo.py`. Two fixes that are not optional:
+ArduPlane entry in `Tools/autotest/pysim/vehicleinfo.py`. **Four** fixes, none optional:
 
-- `RC2_REVERSED` is force-set to 1 for the RealFlight InterLink. Wrong for a TX12 —
-  set it to **0** after verifying pitch direction with `rc guiin`. It persists to EEPROM.
+- **`RC2_REVERSED` 0 *and* `SERVO2_REVERSED` 1 — always as a pair.** The backend force-sets
+  `RC2_REVERSED` to 1 for the RealFlight InterLink, which is wrong for a TX12. But setting
+  it to 0 alone reverses the *pilot's* feel, because `SERVO2_REVERSED` is 0 too and the two
+  reversals were cancelling:
+
+  ```
+  stick --[RC2_REVERSED]--> demand --[SERVO2_REVERSED]--> surface
+  ```
+
+  Left as `1 / 0`, MANUAL feels correct while ArduPlane's internal demand→surface chain is
+  backwards. That is the dangerous case: MANUAL flies fine and **every stabilised mode
+  diverges in pitch**, because the stabiliser computes a correction and the surface moves
+  the wrong way. Flipping both preserves pilot feel and fixes the internal sense.
+
+  Verify by correlating ArduPlane's internal pitch demand (RC-derived, with `RC2_REVERSED`
+  applied) against measured pitch rate in MANUAL — `Tools/autotest/aerobatics_check_pitch.py`
+  does this. Do **not** correlate `SERVO_OUTPUT_RAW` against pitch rate: it is reported
+  *after* `SERVO2_REVERSED`, so flipping the parameter flips both the number and the
+  response and the correlation is invariant. General rule: **a correlation can only detect a
+  sign flip that sits outside the two signals being correlated.**
+
 - `ARSPD_USE` defaults to **0**, so airspeed is measured but unused. Set it to **1**.
   See the entry envelope section — the airspeed gate is meaningless without it.
+- `AIRSPEED_MIN` defaults to **9 m/s** and `AIRSPEED_CRUISE` to **12 m/s**, both generic
+  ArduPlane values. The Extra 300L cruises at ~40 m/s, so `AIRSPEED_CRUISE` 12 is below its
+  stall and TECS will mush. Measured envelope over ~4,900 airborne samples: min 22.7,
+  median 40.6, max 47.0 m/s. Set **`AIRSPEED_MIN 20`, `AIRSPEED_CRUISE 38`**.
+
+  This one is load-bearing for the maneuver: at `AIRSPEED_MIN 9` the entry gate sits at
+  11.7 m/s against a 40 m/s cruise, so it passes always, and the abort only fires once
+  already stalled.
 
 Run `AUTOTUNE` (mode 8) before trusting ACRO rate tracking; stock gains do not fly the
-Extra 300L well.
+Extra 300L well. **Check the gains afterwards rather than assuming they saved** — AUTOTUNE
+saves an axis only if that axis found both a D limit and a P limit, and otherwise reverts
+everything it learned for that axis (`AP_AutoTune::stop()`). In practice roll saved and
+pitch reverted.
 
 ### Gotchas
 
@@ -184,7 +235,13 @@ The altitude and airspeed conditions are also checked continuously during the ma
 where they are abort triggers rather than rejections.
 
 The airspeed gate requires `ARSPD_USE 1` in SITL — otherwise `airspeed_estimate()` returns
-a throttle-and-attitude guess and the gate passes or fails for unrelated reasons.
+a throttle-and-attitude guess and the gate passes or fails for unrelated reasons. It also
+requires `AIRSPEED_MIN` to be set for the airframe: the default of 9 m/s puts the gate at
+11.7 m/s against a 40 m/s cruise, which is no gate at all.
+
+Do not treat the four conditions as redundant. In an unpowered vertical dive (pitch -87°,
+descending) the airspeed gate **passed** — 24-35 m/s is above the threshold — and it was the
+attitude check that refused the command.
 
 ## Parameters
 

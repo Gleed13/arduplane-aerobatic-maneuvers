@@ -3,9 +3,9 @@
 Implementation plan for the automatic aileron roll. Companion to `CLAUDE.md`, which holds
 the settled design decisions; this file holds the order of work.
 
-Status: simulation setup is done and flown. Stages 1-6 done. Stage 7's code refactor is
-done; what remains of stage 7 is the RealFlight tuning itself — AUTOTUNE, then the
-`AEROB_RATE` sweep.
+Status: **stages 1-7 done.** The maneuver has been flown on the Extra 300L in RealFlight,
+tuned, and swept across four roll rates. Results and reproduction steps are in
+`CONCLUSION.md`; the remaining work is the stretch goal (loop) and the gaps listed there.
 
 ## Corrections — applied
 
@@ -221,27 +221,62 @@ live by `Plane::get_aerobatics_state()`, and `angle_to_rate()` divides by them w
 same 0.05 s floor `AP_FW_Controller` applies.
 
 Only **one** constant went, not three. `AEROBATICS_PITCH_RATE_MAX` and
-`AEROBATICS_LEVEL_ROLL_RATE_MAX` stay — the matching `*2SRV_RMAX` parameters default to 0,
-which means no limit — and the `cos(roll)` scaling in `level_off()` stays, since it is
-doing a different job from `tau`.
+`AEROBATICS_LEVEL_ROLL_RATE_MAX` stay, and so does the `cos(roll)` scaling in `level_off()`,
+which is doing a different job from `tau`.
+
+**Correction:** the earlier justification for keeping those two clamps — that the matching
+`*2SRV_RMAX` parameters default to 0, meaning no limit — is only true *before* an autotune.
+`AUTOTUNE` writes them; on the Extra 300L `RLL2SRV_RMAX` became **75**. The conclusion holds
+more strongly than the original reasoning did: `_get_rate_out()` never applies RMAX at all
+(only `get_servo_out()` does, and this code does not use that path), so the library's own
+clamps are the only ones in play either way. It is also a third argument against the
+angle-controller route — a 75 °/s RMAX would have capped ENTRY and EXIT.
 
 Verified in SITL by sweeping the parameter and timing the states:
 
 | `*2SRV_TCONST` | ENTRY | EXIT |
 |---|---|---|
-| 0.25 s | 1000 ms | 0 ms |
-| 0.50 s | 1000 ms | 1000 ms |
-| 1.20 s | 2000 ms | 2000 ms (its bound) |
+| 0.25 s | 739 ms | 440 ms |
+| 0.50 s | 1540 ms | 700 ms |
+| 1.20 s | 2639 ms | 1800 ms |
+
+A 4.8× change in `tau` gives 3.6× on ENTRY and 4.1× on EXIT — near proportional, which is
+what a first-order attitude loop should do, and proof the gain is live rather than baked in.
 
 Two things that table says, both worth carrying into the tuning session:
 
-- **ENTRY is rate-limited, not tau-limited, at 0.5 s and below.** A ~29° pitch error over
-  `tau` 0.5 gives 58 °/s, above the 45 °/s `AEROBATICS_PITCH_RATE_MAX` clamp, so the clamp
-  sets the duration. `tau` only starts driving ENTRY once it is large.
-- **At `tau` 1.20 s, EXIT stops finishing on attitude and falls back to its 2000 ms bound.**
-  That is correct behaviour, not a bug — but if `AUTOTUNE` lands on a large `tau`, expect
-  `AERO: done` to start reporting a few degrees of residual bank, and raise
-  `AEROBATICS_EXIT_MS_MAX` rather than reintroducing a fixed gain.
+- **ENTRY is clamp-limited at the fast end.** At `tau` 0.25 a ~29° pitch error demands
+  116 °/s, clamped to the 45 °/s `AEROBATICS_PITCH_RATE_MAX`, giving a floor near 644 ms —
+  measured 739 ms. That is why ENTRY scales slightly less than EXIT does.
+- **EXIT's 2000 ms bound gets close at large `tau`.** At 1.20 s it takes 1800 ms. If
+  `AUTOTUNE` lands on a large `tau`, expect `AERO: done` to start reporting a few degrees of
+  residual bank, and raise `AEROBATICS_EXIT_MS_MAX` rather than reintroducing a fixed gain.
+
+(Measured by `Tools/autotest/aerobatics_sitl_test.py`, which requests a 20 Hz stream; an
+earlier hand-run gave the same conclusion at 1 s timestamp resolution.)
+
+#### The tuning — done
+
+`AUTOTUNE` on the Extra 300L, then a four-point sweep, hands off, one repetition each:
+
+| `AEROB_RATE` | Ideal 360/R | Measured ROLLING→done | Tracking | Roll counted |
+|---|---|---|---|---|
+| 120 | 3.0 s | 3700 ms | ~100% | 361° |
+| 180 | 2.0 s | 2800 ms | ~95% | 360° |
+| 240 | 1.5 s | 2600 ms | ~79% | 362° |
+| 300 | 1.2 s | 2400 ms | ~71% | 365° |
+
+**`AEROB_RATE 180`.** Delivered rate saturates near 200 °/s however hard you ask, so 180 is
+the fastest demand the airframe still honours.
+
+This is the Main risk below, measured: the demand is not a guarantee, and at 300 °/s the
+roll still completes *correctly* — `roll_accumulated` integrates the true gyro rate — it
+just takes longer than `reps × 360 / rate` predicts. A timeout sized from that arithmetic
+would have aborted good rolls; the 3× bound was necessary.
+
+The overshoot is discretisation, not error: 365° at 300 °/s is one control loop
+(`300 °/s × 0.02 s = 6°`), since the termination check fires after the integration step, and
+it scales with rate exactly as predicted.
 
 ### Stretch — loop
 
