@@ -3,7 +3,9 @@
 Implementation plan for the automatic aileron roll. Companion to `CLAUDE.md`, which holds
 the settled design decisions; this file holds the order of work.
 
-Status: simulation setup is done and flown. Stages 1-6 done; next is stage 7.
+Status: simulation setup is done and flown. Stages 1-6 done. Stage 7's code refactor is
+done; what remains of stage 7 is the RealFlight tuning itself — AUTOTUNE, then the
+`AEROB_RATE` sweep.
 
 ## Corrections — applied
 
@@ -187,34 +189,59 @@ rejections: `AERO: abort in ROLLING (pilot|altitude|airspeed|timeout|mode change
 `AUTOTUNE` first — stock gains do not fly the Extra 300L well and the rate controller must
 track before any of the numbers mean anything. Then sweep `AEROB_RATE`.
 
+#### The gain refactor — done
+
 **Take the level-off gain from the plane, not from a constant.** `AEROBATICS_LEVEL_P` (2.0)
-duplicates ArduPlane's own attitude loop, which computes the same thing as
+duplicated ArduPlane's own attitude loop, which computes the same thing as
 `angle_err_deg / gains.tau` in `AP_RollController.cpp` and `AP_PitchController.cpp`.
 `gains.tau` is `RLL2SRV_TCONST` / `PTCH2SRV_TCONST`, default 0.5 s — so ArduPlane's default
-is exactly 1/0.5 = 2.0, and the constant matches only by luck.
+is exactly 1/0.5 = 2.0, and the constant matched only by luck.
 
 It matters here specifically: `AUTOTUNE` *adjusts* `tau`. Run it and the plane's attitude
 loop retunes itself while ENTRY and EXIT go on using 2.0.
 
-`gains` is `protected` in `AP_FW_Controller.h` with no accessor, so neither the library nor
-the ACRO hook can read `tau` today. Two ways out:
+**Correction to this plan.** The two options below were written against a wrong reading of
+the tree, and the reasoning that picked between them does not survive checking:
 
-- add a one-line `get_tau()` accessor and pass `1/tau` into `update()` — minimal, but
-  modifies a shared upstream library for one consumer
-- have ENTRY and EXIT drive the *angle* controllers instead of returning rates. Better
-  shape, and the precedent is already in `mode_acro.cpp`: acro locking calls
-  `rollController.get_servo_out(angle_err_cd, ...)` when the stick is centred and
-  `get_rate_out(rate, ...)` when it is not. ENTRY and EXIT are attitude-holding phases and
-  ROLLING is a rate phase, so the same split fits. Gets `tau`, `RMAX` and the full PID for
-  free and deletes three constants.
+- `gains` is protected, but **`AP_FW_Controller` already exposes `AP_Float &tau(void)`**,
+  public. No accessor needs adding and no upstream file is touched — so the stated cost of
+  the first option ("modifies a shared upstream library for one consumer") is zero.
+  `ModeAcro::stabilize_quaternion()` already reads it exactly this way
+  (`desired_rates.x /= plane.rollController.tau()`), in the same file as our hook.
+- The second option carries a hazard this plan did not anticipate.
+  `AP_PitchController::get_servo_out()` does not just divide by `tau`; it adds
+  `_get_coordination_rate_offset()`, a turn-coordination pitch-up proportional to
+  `tan(bank)·sin(bank)`. **An aileron roll is not a turn.** The term is bounded (±80°
+  upright, 100–180° inverted) but is already large at 80° of bank, and `ABORT` can begin at
+  *any* bank angle. Driving the angle controller would import a turn-coordination pull
+  straight into the inverted recovery.
 
-Cost of the second: `Output` stops being two plain rates — it has to say whether each axis
-is an angle or a rate demand, and the hook dispatches on that. Roughly 30 lines across the
-library and the hook, plus a re-fly to confirm ENTRY and EXIT still finish on their
-attitude conditions rather than their time bounds.
+So the first option was taken. `VehicleState` carries `roll_tau` and `pitch_tau`, filled
+live by `Plane::get_aerobatics_state()`, and `angle_to_rate()` divides by them with the
+same 0.05 s floor `AP_FW_Controller` applies.
 
-`AEROBATICS_PITCH_RATE_MAX` and `AEROBATICS_LEVEL_ROLL_RATE_MAX` are *not* redundant the
-same way: the matching `*2SRV_RMAX` parameters default to 0, which means no limit.
+Only **one** constant went, not three. `AEROBATICS_PITCH_RATE_MAX` and
+`AEROBATICS_LEVEL_ROLL_RATE_MAX` stay — the matching `*2SRV_RMAX` parameters default to 0,
+which means no limit — and the `cos(roll)` scaling in `level_off()` stays, since it is
+doing a different job from `tau`.
+
+Verified in SITL by sweeping the parameter and timing the states:
+
+| `*2SRV_TCONST` | ENTRY | EXIT |
+|---|---|---|
+| 0.25 s | 1000 ms | 0 ms |
+| 0.50 s | 1000 ms | 1000 ms |
+| 1.20 s | 2000 ms | 2000 ms (its bound) |
+
+Two things that table says, both worth carrying into the tuning session:
+
+- **ENTRY is rate-limited, not tau-limited, at 0.5 s and below.** A ~29° pitch error over
+  `tau` 0.5 gives 58 °/s, above the 45 °/s `AEROBATICS_PITCH_RATE_MAX` clamp, so the clamp
+  sets the duration. `tau` only starts driving ENTRY once it is large.
+- **At `tau` 1.20 s, EXIT stops finishing on attitude and falls back to its 2000 ms bound.**
+  That is correct behaviour, not a bug — but if `AUTOTUNE` lands on a large `tau`, expect
+  `AERO: done` to start reporting a few degrees of residual bank, and raise
+  `AEROBATICS_EXIT_MS_MAX` rather than reintroducing a fixed gain.
 
 ### Stretch — loop
 

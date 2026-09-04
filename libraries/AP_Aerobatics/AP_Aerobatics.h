@@ -92,6 +92,16 @@ public:
         // Non-zero enough and the pilot gets the aircraft straight back.
         float pilot_roll;
         float pilot_pitch;
+        /*
+          RLL2SRV_TCONST and PTCH2SRV_TCONST, seconds. The attitude
+          seeking states turn an angle error into a rate demand at
+          1/tau, which is what ArduPlane's own attitude loop does. Read
+          from the controllers every loop rather than baked in as a
+          constant, because AUTOTUNE adjusts tau and anything holding a
+          fixed gain silently stops matching the aircraft.
+         */
+        float roll_tau;
+        float pitch_tau;
     };
 
     // rate targets the ACRO hook writes over the pilot's, in deg/s
@@ -164,7 +174,11 @@ private:
       near upright after a whole number of rolls, ABORT can arrive
       anywhere in one.
      */
-    bool level_off(Output &out) const;
+    bool level_off(const VehicleState &vs, Output &out) const;
+
+    // angle error in degrees to a rate demand in deg/s, at 1/tau.
+    // Clamps tau the way AP_FW_Controller does before dividing by it.
+    static float angle_to_rate(float angle_err_deg, float tau);
 
     void set_state(State s);
 

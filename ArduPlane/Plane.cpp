@@ -1119,6 +1119,15 @@ void Plane::get_aerobatics_state(AP_Aerobatics::VehicleState &vs)
     // is exactly zero and cannot creep past the abort threshold
     vs.pilot_roll = roll_in_expo(true) / SERVO_MAX;
     vs.pilot_pitch = pitch_in_expo(true) / SERVO_MAX;
+
+    /*
+      read live rather than cached at command time: AUTOTUNE adjusts
+      these, and the maneuver's attitude loops should follow the tuning
+      rather than a gain of their own. ModeAcro::stabilize_quaternion()
+      reads them the same way.
+     */
+    vs.roll_tau = rollController.tau();
+    vs.pitch_tau = pitchController.tau();
 }
 #endif // AP_AEROBATICS_ENABLED
 

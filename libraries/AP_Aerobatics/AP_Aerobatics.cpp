@@ -20,15 +20,23 @@
 #define AEROBATICS_REPS_MAX             5
 
 /*
-  ENTRY and EXIT both fly an attitude to a target, which the rate
-  controllers below need as a rate demand. One proportional gain, in
-  1/s, converts the remaining attitude error in degrees into deg/s.
+  ENTRY, EXIT and ABORT all fly an attitude to a target, which the rate
+  controllers need as a rate demand. The conversion is the one
+  ArduPlane's own attitude loop uses -- angle_err_deg / tau, with tau
+  taken live from RLL2SRV_TCONST and PTCH2SRV_TCONST -- so the maneuver
+  closes its attitude loops at the same speed the aircraft is tuned for.
+  AUTOTUNE adjusts tau, and a fixed gain here would quietly stop
+  matching the aircraft the moment it ran.
 
-  This duplicates ArduPlane's own attitude loop, which uses
-  angle_err_deg / gains.tau (RLL2SRV_TCONST, default 0.5s, so 2.0).
-  AUTOTUNE adjusts tau and will not adjust this. See PLAN.md stage 7.
+  Floor matches the one AP_FW_Controller applies before dividing by tau.
  */
-#define AEROBATICS_LEVEL_P             2.0
+#define AEROBATICS_TAU_MIN            0.05   // s
+
+/*
+  rate clamps on the attitude-seeking states. NOT redundant with the
+  controllers' own RMAX: PTCH2SRV_RMAX and RLL2SRV_RMAX_* default to 0,
+  which means no limit at all.
+ */
 #define AEROBATICS_PITCH_RATE_MAX     45.0   // deg/s
 #define AEROBATICS_LEVEL_ROLL_RATE_MAX 90.0  // deg/s
 
@@ -216,11 +224,11 @@ bool AP_Aerobatics::update(float dt, const VehicleState &vs, Output &out)
           starting there and finishing well below it.
          */
         const float pitch_err = radians(pitch.get()) - ahrs.get_pitch_rad();
-        out.pitch_rate_dps = constrain_float(degrees(pitch_err) * AEROBATICS_LEVEL_P,
+        out.pitch_rate_dps = constrain_float(angle_to_rate(degrees(pitch_err), vs.pitch_tau),
                                              -AEROBATICS_PITCH_RATE_MAX,
                                              AEROBATICS_PITCH_RATE_MAX);
         // hold the wings level on the way up
-        out.roll_rate_dps = constrain_float(-degrees(ahrs.get_roll_rad()) * AEROBATICS_LEVEL_P,
+        out.roll_rate_dps = constrain_float(angle_to_rate(-degrees(ahrs.get_roll_rad()), vs.roll_tau),
                                             -AEROBATICS_LEVEL_ROLL_RATE_MAX,
                                             AEROBATICS_LEVEL_ROLL_RATE_MAX);
 
@@ -258,7 +266,7 @@ bool AP_Aerobatics::update(float dt, const VehicleState &vs, Output &out)
         break;
 
     case State::EXIT:
-        if (level_off(out) || state_elapsed >= AEROBATICS_EXIT_MS_MAX) {
+        if (level_off(vs, out) || state_elapsed >= AEROBATICS_EXIT_MS_MAX) {
             gcs().send_text(MAV_SEVERITY_INFO, "AERO: done, roll=%.0f bank=%.0f pitch=%.0f",
                             double(degrees(roll_accumulated)),
                             double(degrees(ahrs.get_roll_rad())),
@@ -278,7 +286,7 @@ bool AP_Aerobatics::update(float dt, const VehicleState &vs, Output &out)
           it is still true, and re-triggering would only restart the
           time bound. See check_aborts().
          */
-        if (level_off(out) || state_elapsed >= AEROBATICS_ABORT_MS_MAX) {
+        if (level_off(vs, out) || state_elapsed >= AEROBATICS_ABORT_MS_MAX) {
             gcs().send_text(MAV_SEVERITY_INFO, "AERO: recovered, bank=%.0f pitch=%.0f",
                             double(degrees(ahrs.get_roll_rad())),
                             double(degrees(ahrs.get_pitch_rad())));
@@ -363,7 +371,7 @@ AP_Aerobatics::AbortReason AP_Aerobatics::check_aborts(const VehicleState &vs) c
 /*
   fly both axes back to level, returning true once there.
  */
-bool AP_Aerobatics::level_off(Output &out) const
+bool AP_Aerobatics::level_off(const VehicleState &vs, Output &out) const
 {
     const AP_AHRS &ahrs = AP::ahrs();
 
@@ -372,7 +380,7 @@ bool AP_Aerobatics::level_off(Output &out) const
     const float roll_rad = ahrs.get_roll_rad();
     const float pitch_err = -ahrs.get_pitch_rad();
 
-    out.roll_rate_dps = constrain_float(degrees(-roll_rad) * AEROBATICS_LEVEL_P,
+    out.roll_rate_dps = constrain_float(angle_to_rate(degrees(-roll_rad), vs.roll_tau),
                                         -AEROBATICS_LEVEL_ROLL_RATE_MAX,
                                         AEROBATICS_LEVEL_ROLL_RATE_MAX);
 
@@ -388,7 +396,7 @@ bool AP_Aerobatics::level_off(Output &out) const
       up -- exactly wrong for the altitude trigger that is the most
       likely reason to be there.
      */
-    out.pitch_rate_dps = constrain_float(degrees(pitch_err) * AEROBATICS_LEVEL_P * cosf(roll_rad),
+    out.pitch_rate_dps = constrain_float(angle_to_rate(degrees(pitch_err), vs.pitch_tau) * cosf(roll_rad),
                                          -AEROBATICS_PITCH_RATE_MAX,
                                          AEROBATICS_PITCH_RATE_MAX);
 
@@ -400,6 +408,16 @@ bool AP_Aerobatics::level_off(Output &out) const
     return fabsf(roll_rad) <= radians(AEROBATICS_EXIT_TOL) &&
            fabsf(pitch_err) <= radians(AEROBATICS_EXIT_TOL) &&
            fabsf(ahrs.get_gyro().x) <= radians(AEROBATICS_EXIT_RATE_TOL);
+}
+
+/*
+  the same conversion AP_RollController and AP_PitchController apply to
+  an angle error, so the maneuver's attitude loops run at the speed the
+  aircraft is actually tuned for rather than at a gain of our own.
+ */
+float AP_Aerobatics::angle_to_rate(float angle_err_deg, float tau)
+{
+    return angle_err_deg / MAX(tau, AEROBATICS_TAU_MIN);
 }
 
 void AP_Aerobatics::report_abort(AbortReason r) const
