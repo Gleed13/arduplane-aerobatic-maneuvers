@@ -59,10 +59,25 @@ public:
         ENVELOPE,           // entry envelope check failed
     };
 
+    // why a running maneuver was given up on. Reported to the GCS and
+    // otherwise unused: the recovery is the same whatever the cause.
+    enum class AbortReason : uint8_t {
+        NONE = 0,
+        PILOT,          // pilot moved a stick
+        ALTITUDE,       // fell below AEROB_ALT_MIN
+        AIRSPEED,       // fell below AIRSPEED_MIN
+        TIMEOUT,        // ROLLING ran long
+        NOT_FLYING,
+        MODE_CHANGE,    // left ACRO, via reset()
+    };
+
     /*
       vehicle state the library cannot obtain for itself. Attitude and
       body rates come from AP::ahrs(); these do not, so the ACRO hook
       passes them in.
+
+      Filled by Plane::get_aerobatics_state() for both callers, so the
+      entry checks and the in-flight abort checks cannot drift apart.
      */
     struct VehicleState {
         float alt_agl;          // m above ground
@@ -72,6 +87,11 @@ public:
         // estimate is rejected rather than trusted -- see check_envelope()
         bool airspeed_valid;
         bool is_flying;
+        // pilot roll and pitch sticks, normalised to -1..1 with the
+        // deadzone applied, so a centred stick reads exactly zero.
+        // Non-zero enough and the pilot gets the aircraft straight back.
+        float pilot_roll;
+        float pilot_pitch;
     };
 
     // rate targets the ACRO hook writes over the pilot's, in deg/s
@@ -98,14 +118,18 @@ public:
       ACRO hook must use in place of the pilot's; false means idle and
       the pilot keeps the sticks.
 
+      vs is re-read every loop, not just at command time: altitude,
+      airspeed and the sticks are abort triggers here.
+
       dt is the true loop timestep -- plane.G_Dt, never a hardcoded
       0.02: stabilize() is a FAST_TASK, so it runs at SCHED_LOOP_RATE
       and 50Hz is only the ArduPlane default.
      */
-    bool update(float dt, Output &out);
+    bool update(float dt, const VehicleState &vs, Output &out);
 
     // return to IDLE, discarding any running maneuver. Called on ACRO
-    // entry and exit so stale state never survives a mode change.
+    // entry and exit so stale state never survives a mode change: this
+    // object outlives the mode, so nothing else clears it.
     void reset(void);
 
     State get_state(void) const { return state; }
@@ -128,6 +152,20 @@ private:
     // for a rejection to the GCS; the caller only sees pass or fail.
     bool check_envelope(const VehicleState &vs) const;
 
+    // the abort triggers, tested every loop while a maneuver runs
+    AbortReason check_aborts(const VehicleState &vs) const;
+
+    void report_abort(AbortReason r) const;
+    static const char *abort_reason_name(AbortReason r);
+
+    /*
+      fly both axes back to level, filling out with the rate demands and
+      returning true once there. Shared by EXIT and ABORT: EXIT arrives
+      near upright after a whole number of rolls, ABORT can arrive
+      anywhere in one.
+     */
+    bool level_off(Output &out) const;
+
     void set_state(State s);
 
     State state = State::IDLE;
@@ -137,8 +175,12 @@ private:
     // the ENTRY wings-levelling does not count toward the rotation.
     float roll_accumulated = 0;
 
-    // when the current state began, for the ENTRY and EXIT time bounds
+    // when the current state began, for the per-state time bounds
     uint32_t state_ms = 0;
+
+    // how long ROLLING may run before it is treated as a failure.
+    // Sized in start() from the commanded rate, not from a constant.
+    uint32_t rolling_ms_max = 0;
 
     // the running request
     struct {

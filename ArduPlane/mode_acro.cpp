@@ -84,11 +84,23 @@ void ModeAcro::stabilize()
       real timestep: stabilize() is a FAST_TASK, so it runs at
       SCHED_LOOP_RATE rather than a fixed 50Hz.
      */
-    AP_Aerobatics::Output aero_out;
-    if (plane.g2.aerobatics.update(plane.G_Dt, aero_out)) {
-        roll_rate = aero_out.roll_rate_dps;
-        pitch_rate = aero_out.pitch_rate_dps;
-        aerobatics_active = true;
+    if (plane.g2.aerobatics.active()) {
+        // gathered only while a maneuver runs: it costs an AGL lookup
+        // and an airspeed estimate, and nothing reads it otherwise
+        AP_Aerobatics::VehicleState aero_vs;
+        plane.get_aerobatics_state(aero_vs);
+
+        AP_Aerobatics::Output aero_out;
+        if (plane.g2.aerobatics.update(plane.G_Dt, aero_vs, aero_out)) {
+            roll_rate = aero_out.roll_rate_dps;
+            pitch_rate = aero_out.pitch_rate_dps;
+            aerobatics_active = true;
+        }
+        /*
+          update() returning false here is an abort or a normal finish
+          on this very loop. rexpo/pexpo above are already the pilot's,
+          so falling through hands the sticks back with no gap.
+         */
     }
 #endif
 

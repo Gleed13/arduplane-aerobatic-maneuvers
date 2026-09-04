@@ -770,17 +770,8 @@ MAV_RESULT GCS_MAVLINK_Plane::handle_command_aerobatic_maneuver(const mavlink_co
         return MAV_RESULT_TEMPORARILY_REJECTED;
     }
 
-    // zero-initialised: airspeed_EAS() leaves its argument untouched when
-    // it returns false
-    AP_Aerobatics::VehicleState vs {};
-    vs.alt_agl = plane.relative_ground_altitude(RangeFinderUse::NONE);
-    vs.airspeed_min = plane.aparm.airspeed_min;
-    vs.is_flying = plane.is_flying();
-
-    // using_airspeed_sensor() distinguishes a real reading from a
-    // synthetic one; the library rejects the synthetic case
-    vs.airspeed_valid = plane.ahrs.airspeed_EAS(vs.airspeed) &&
-                        plane.ahrs.using_airspeed_sensor();
+    AP_Aerobatics::VehicleState vs;
+    plane.get_aerobatics_state(vs);
 
     const AP_Aerobatics::Maneuver m = AP_Aerobatics::Maneuver(uint8_t(packet.param1));
 

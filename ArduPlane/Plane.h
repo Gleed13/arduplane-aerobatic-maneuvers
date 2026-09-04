@@ -886,6 +886,14 @@ private:
     void update_quicktune(void);
 #endif
 
+#if AP_AEROBATICS_ENABLED
+    // fill in the vehicle state AP_Aerobatics cannot read for itself.
+    // Used both by the command handler for the entry checks and by the
+    // ACRO hook every loop for the abort checks, so the two cannot
+    // disagree about what the aircraft is doing.
+    void get_aerobatics_state(AP_Aerobatics::VehicleState &vs);
+#endif
+
     // Attitude.cpp
     void adjust_nav_pitch_throttle(void);
     void update_load_factor(void);

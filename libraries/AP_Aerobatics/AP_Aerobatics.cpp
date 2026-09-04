@@ -42,10 +42,37 @@
   bounds on the two attitude-seeking states, so neither can hang if the
   target is never reached -- a nose-up target the aircraft cannot hold,
   or a level-off fighting a trim offset. Reaching one is not an abort,
-  it just moves the machine on. Stage 6 adds the real abort triggers.
+  it just moves the machine on: not reaching the entry pitch is a worse
+  roll, not a dangerous one, and EXIT has already done the useful part
+  of the level-off by the time its bound expires.
  */
 #define AEROBATICS_ENTRY_MS_MAX       3000
 #define AEROBATICS_EXIT_MS_MAX        2000
+
+// how long the ABORT recovery may fly before it gives the sticks back
+// regardless. Longer than EXIT: it can start from any bank angle.
+#define AEROBATICS_ABORT_MS_MAX       3000
+
+/*
+  stick deflection, normalised and past the deadzone, that hands the
+  aircraft straight back to the pilot. Low enough that a deliberate
+  input is unambiguous, high enough to ignore a trim offset on a
+  transmitter that is not perfectly centred.
+ */
+#define AEROBATICS_PILOT_STICK        0.15
+
+/*
+  ROLLING time bound, as a multiple of the ideal reps*360/rate.
+
+  AEROB_RATE is a demand, not a guarantee. If the tuning cannot deliver
+  it the roll still completes correctly -- roll_accumulated integrates
+  the true gyro rate -- it just takes longer than the arithmetic says,
+  so a tight bound would abort perfectly good maneuvers. This one only
+  catches a roll that has genuinely stopped making progress.
+ */
+#define AEROBATICS_ROLL_TIME_FACTOR    3.0
+#define AEROBATICS_ROLL_MS_MIN        3000
+#define AEROBATICS_ROLL_MS_MAX       20000
 
 // entry envelope. Margin over AIRSPEED_MIN, and how far from level the
 // aircraft may be when the command arrives.
@@ -115,6 +142,12 @@ AP_Aerobatics::StartResult AP_Aerobatics::start(Maneuver m, float direction, flo
     const float requested = is_positive(rate_dps) ? rate_dps : rate.get();
     current.rate_dps = constrain_float(requested, AEROBATICS_RATE_MIN, AEROBATICS_RATE_MAX);
 
+    // sized from what was actually commanded, so a slow roll of five
+    // repetitions is not held to the same bound as one fast one
+    const float ideal_s = current.reps * 360.0 / current.rate_dps;
+    rolling_ms_max = constrain_int32(int32_t(ideal_s * AEROBATICS_ROLL_TIME_FACTOR * 1000),
+                                     AEROBATICS_ROLL_MS_MIN, AEROBATICS_ROLL_MS_MAX);
+
     roll_accumulated = 0;
     set_state(State::ENTRY);
 
@@ -130,7 +163,7 @@ AP_Aerobatics::StartResult AP_Aerobatics::start(Maneuver m, float direction, flo
   computing the pilot rate targets, and uses out only when this returns
   true.
  */
-bool AP_Aerobatics::update(float dt, Output &out)
+bool AP_Aerobatics::update(float dt, const VehicleState &vs, Output &out)
 {
     if (state == State::IDLE) {
         return false;
@@ -143,6 +176,31 @@ bool AP_Aerobatics::update(float dt, Output &out)
     out.roll_rate_dps = 0;
     out.pitch_rate_dps = 0;
 
+    /*
+      aborts are tested before the state machine runs, so one takes
+      effect on the loop it is detected rather than a loop later still
+      flying the maneuver.
+     */
+    const AbortReason abort = check_aborts(vs);
+    if (abort != AbortReason::NONE) {
+        report_abort(abort);
+        if (abort == AbortReason::PILOT) {
+            /*
+              the pilot moving a stick is a request for the aircraft,
+              not for a recovery: hand it back on this loop with the
+              rate targets untouched, so the sticks they are already
+              holding take effect immediately. Every other trigger goes
+              through ABORT, which flies the aircraft back to level
+              first -- the pilot has not asked for it and it may be
+              inverted.
+             */
+            set_state(State::IDLE);
+            return false;
+        }
+        set_state(State::ABORT);
+    }
+
+    // read after the abort dispatch: entering ABORT restarts the clock
     const uint32_t state_elapsed = AP_HAL::millis() - state_ms;
 
     switch (state) {
@@ -199,33 +257,30 @@ bool AP_Aerobatics::update(float dt, Output &out)
         }
         break;
 
-    case State::EXIT: {
-        /*
-          fly back to level on both axes. get_roll_rad() is already
-          wrapped to +-180, so negating it is the shortest way round.
-         */
-        const float roll_err = -ahrs.get_roll_rad();
-        const float pitch_err = -ahrs.get_pitch_rad();
-        out.roll_rate_dps = constrain_float(degrees(roll_err) * AEROBATICS_LEVEL_P,
-                                            -AEROBATICS_LEVEL_ROLL_RATE_MAX,
-                                            AEROBATICS_LEVEL_ROLL_RATE_MAX);
-        out.pitch_rate_dps = constrain_float(degrees(pitch_err) * AEROBATICS_LEVEL_P,
-                                             -AEROBATICS_PITCH_RATE_MAX,
-                                             AEROBATICS_PITCH_RATE_MAX);
-
-        /*
-          the rate condition matters as much as the angles: roll passes
-          through level at full rate on the way out, and handing back
-          there leaves acro_locking to hold whatever bank it inherits.
-         */
-        const bool level = fabsf(roll_err) <= radians(AEROBATICS_EXIT_TOL) &&
-                           fabsf(pitch_err) <= radians(AEROBATICS_EXIT_TOL) &&
-                           fabsf(ahrs.get_gyro().x) <= radians(AEROBATICS_EXIT_RATE_TOL);
-
-        if (level || state_elapsed >= AEROBATICS_EXIT_MS_MAX) {
-            gcs().send_text(MAV_SEVERITY_INFO, "AERO: done, roll=%.0f roll_err=%.0f pitch=%.0f",
+    case State::EXIT:
+        if (level_off(out) || state_elapsed >= AEROBATICS_EXIT_MS_MAX) {
+            gcs().send_text(MAV_SEVERITY_INFO, "AERO: done, roll=%.0f bank=%.0f pitch=%.0f",
                             double(degrees(roll_accumulated)),
-                            double(degrees(roll_err)),
+                            double(degrees(ahrs.get_roll_rad())),
+                            double(degrees(ahrs.get_pitch_rad())));
+            set_state(State::IDLE);
+            return false;
+        }
+        break;
+
+    case State::ABORT:
+        /*
+          the same level-off EXIT flies, for the same reason: an abort
+          can land anywhere in the roll, and handing back at an
+          arbitrary bank leaves acro_locking holding it.
+
+          The trigger is deliberately not re-checked while recovering --
+          it is still true, and re-triggering would only restart the
+          time bound. See check_aborts().
+         */
+        if (level_off(out) || state_elapsed >= AEROBATICS_ABORT_MS_MAX) {
+            gcs().send_text(MAV_SEVERITY_INFO, "AERO: recovered, bank=%.0f pitch=%.0f",
+                            double(degrees(ahrs.get_roll_rad())),
                             double(degrees(ahrs.get_pitch_rad())));
             set_state(State::IDLE);
             return false;
@@ -233,21 +288,125 @@ bool AP_Aerobatics::update(float dt, Output &out)
         break;
     }
 
-    case State::ABORT:
-        // stage 6 fills this in; nothing reaches it yet
-        set_state(State::IDLE);
-        return false;
-    }
-
     return true;
 }
 
 void AP_Aerobatics::reset(void)
 {
-    roll_accumulated = 0;
     if (state != State::IDLE) {
+        /*
+          the only way to arrive here with a maneuver running is a mode
+          change: ModeAcro::_exit() calls this. No recovery is flown --
+          the new mode is already in control of the aircraft, and ACRO
+          is the only mode this maneuver may run in.
+         */
+        report_abort(AbortReason::MODE_CHANGE);
         set_state(State::IDLE);
     }
+    roll_accumulated = 0;
+}
+
+/*
+  the abort triggers, tested every loop while a maneuver runs. Returns
+  the first that fires; the caller decides what to do with it.
+
+  Altitude and airspeed are the same two conditions check_envelope()
+  gates entry on, but they abort here rather than reject.
+ */
+AP_Aerobatics::AbortReason AP_Aerobatics::check_aborts(const VehicleState &vs) const
+{
+    /*
+      the pilot wins in every state, ABORT included: if they are on the
+      sticks they want the aircraft, not a recovery they have to fight.
+     */
+    if (fabsf(vs.pilot_roll) > AEROBATICS_PILOT_STICK ||
+        fabsf(vs.pilot_pitch) > AEROBATICS_PILOT_STICK) {
+        return AbortReason::PILOT;
+    }
+
+    // an abort already in progress is flying its recovery; the
+    // condition that triggered it is still true and re-triggering would
+    // only keep pushing its time bound out
+    if (state == State::ABORT) {
+        return AbortReason::NONE;
+    }
+
+    if (!vs.is_flying) {
+        return AbortReason::NOT_FLYING;
+    }
+
+    if (vs.alt_agl < alt_min) {
+        return AbortReason::ALTITUDE;
+    }
+
+    /*
+      the entry gate is 1.3 x AIRSPEED_MIN; the floor here is
+      AIRSPEED_MIN itself. A roll bleeds speed, so holding the entry
+      margin through the maneuver would abort nearly every one of them.
+
+      A sensor that drops out mid-roll leaves the check off rather than
+      aborting: the synthetic estimate is a throttle-and-attitude guess
+      and would fire for reasons unrelated to airspeed.
+     */
+    if (vs.airspeed_valid && vs.airspeed < vs.airspeed_min) {
+        return AbortReason::AIRSPEED;
+    }
+
+    if (state == State::ROLLING &&
+        AP_HAL::millis() - state_ms >= rolling_ms_max) {
+        return AbortReason::TIMEOUT;
+    }
+
+    return AbortReason::NONE;
+}
+
+/*
+  fly both axes back to level, returning true once there.
+ */
+bool AP_Aerobatics::level_off(Output &out) const
+{
+    const AP_AHRS &ahrs = AP::ahrs();
+
+    // get_roll_rad() is already wrapped to +-180, so rolling against it
+    // is the shortest way round
+    const float roll_rad = ahrs.get_roll_rad();
+    const float pitch_err = -ahrs.get_pitch_rad();
+
+    out.roll_rate_dps = constrain_float(degrees(-roll_rad) * AEROBATICS_LEVEL_P,
+                                        -AEROBATICS_LEVEL_ROLL_RATE_MAX,
+                                        AEROBATICS_LEVEL_ROLL_RATE_MAX);
+
+    /*
+      the demand is a body rate but the error is an Euler angle, and the
+      two are related by cos(roll): theta_dot = q*cos(roll) - r*sin(roll).
+      Scaling by cos(roll) reverses the elevator when inverted and fades
+      it out through knife edge, where elevator cannot change pitch
+      attitude at all.
+
+      It matters for ABORT specifically. Aborting from the inverted half
+      of a roll with an unscaled demand pulls the nose down rather than
+      up -- exactly wrong for the altitude trigger that is the most
+      likely reason to be there.
+     */
+    out.pitch_rate_dps = constrain_float(degrees(pitch_err) * AEROBATICS_LEVEL_P * cosf(roll_rad),
+                                         -AEROBATICS_PITCH_RATE_MAX,
+                                         AEROBATICS_PITCH_RATE_MAX);
+
+    /*
+      the rate condition matters as much as the angles: roll passes
+      through level at full rate on the way out, and handing back there
+      leaves acro_locking to hold whatever bank it inherits.
+     */
+    return fabsf(roll_rad) <= radians(AEROBATICS_EXIT_TOL) &&
+           fabsf(pitch_err) <= radians(AEROBATICS_EXIT_TOL) &&
+           fabsf(ahrs.get_gyro().x) <= radians(AEROBATICS_EXIT_RATE_TOL);
+}
+
+void AP_Aerobatics::report_abort(AbortReason r) const
+{
+    gcs().send_text(MAV_SEVERITY_WARNING, "AERO: abort in %s (%s) roll=%.0f",
+                    state_name(), abort_reason_name(r),
+                    double(degrees(roll_accumulated)));
 }
 
 /*
@@ -313,6 +472,27 @@ void AP_Aerobatics::set_state(State s)
     // ENTRY and EXIT are both bounded, so every state needs its start time
     state_ms = AP_HAL::millis();
     gcs().send_text(MAV_SEVERITY_INFO, "AERO: %s", state_name(s));
+}
+
+const char *AP_Aerobatics::abort_reason_name(AbortReason r)
+{
+    switch (r) {
+    case AbortReason::NONE:
+        return "none";
+    case AbortReason::PILOT:
+        return "pilot";
+    case AbortReason::ALTITUDE:
+        return "altitude";
+    case AbortReason::AIRSPEED:
+        return "airspeed";
+    case AbortReason::TIMEOUT:
+        return "timeout";
+    case AbortReason::NOT_FLYING:
+        return "not flying";
+    case AbortReason::MODE_CHANGE:
+        return "mode change";
+    }
+    return "unknown";
 }
 
 const char *AP_Aerobatics::state_name(State s)

@@ -3,7 +3,7 @@
 Implementation plan for the automatic aileron roll. Companion to `CLAUDE.md`, which holds
 the settled design decisions; this file holds the order of work.
 
-Status: simulation setup is done and flown. Stages 1-5 done; next is stage 6.
+Status: simulation setup is done and flown. Stages 1-6 done; next is stage 7.
 
 ## Corrections — applied
 
@@ -155,6 +155,32 @@ Stick input, altitude floor, airspeed, timeout, mode change.
 
 Mode change needs care: the maneuver object outlives the mode, so `ModeAcro::_enter()`
 will not reset it for you. Reset explicitly on mode exit rather than assuming.
+
+Two decisions worth keeping:
+
+**The pilot gets the aircraft back immediately; everything else flies a recovery.** A
+stick input is a request for the aircraft, so `update()` returns false on that loop and
+the pilot's own `rexpo`/`pexpo` rates — already computed above the hook — take effect with
+no gap. The other triggers go through `ABORT`, which levels both axes first: the pilot has
+not asked for the aircraft and it may well be inverted.
+
+**The level-off scales the pitch demand by `cos(roll)`.** The demand is a body rate, the
+error is an Euler angle, and `theta_dot = q*cos(roll) - r*sin(roll)`. Unscaled, an abort
+from the inverted half of a roll drives the nose *down* — exactly wrong for the altitude
+trigger, which is the most likely reason to be there. Scaling reverses the elevator when
+inverted and fades it out through knife edge. `EXIT` shares the same helper; near upright
+`cos(roll)` is ~1, so it changes nothing there.
+
+`VehicleState` is now read every loop rather than once at command time, and both callers
+fill it through `Plane::get_aerobatics_state()` so the entry checks and the abort checks
+cannot drift apart.
+
+The `ROLLING` bound is sized in `start()` from what was actually commanded, at three times
+`reps*360/rate`. See Main risk: the demand is not a guarantee, and a bound sized from that
+arithmetic aborts good maneuvers.
+
+Verified in SITL on `plane-3d`, all five triggers plus a clean roll and the two entry
+rejections: `AERO: abort in ROLLING (pilot|altitude|airspeed|timeout|mode change)`.
 
 ### 7 — Tuning in RealFlight
 

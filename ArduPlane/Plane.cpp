@@ -1095,6 +1095,33 @@ void Plane::update_quicktune(void)
 }
 #endif
 
+#if AP_AEROBATICS_ENABLED
+/*
+  gather the vehicle state AP_Aerobatics is not allowed to reach for
+  itself. The library lives under libraries/ and so cannot include
+  Plane.h; attitude and body rates it reads through AP::ahrs(), and
+  everything here is passed in instead.
+ */
+void Plane::get_aerobatics_state(AP_Aerobatics::VehicleState &vs)
+{
+    vs.alt_agl = relative_ground_altitude(RangeFinderUse::NONE);
+    vs.airspeed_min = aparm.airspeed_min;
+    vs.is_flying = is_flying();
+
+    // using_airspeed_sensor() distinguishes a real reading from a
+    // synthetic one; the library will not gate on the synthetic case.
+    // airspeed_EAS() leaves its argument untouched when it returns
+    // false, so clear it first rather than passing on a stale value.
+    vs.airspeed = 0;
+    vs.airspeed_valid = ahrs.airspeed_EAS(vs.airspeed) && ahrs.using_airspeed_sensor();
+
+    // normalised to -1..1 with the deadzone applied, so a centred stick
+    // is exactly zero and cannot creep past the abort threshold
+    vs.pilot_roll = roll_in_expo(true) / SERVO_MAX;
+    vs.pilot_pitch = pitch_in_expo(true) / SERVO_MAX;
+}
+#endif // AP_AEROBATICS_ENABLED
+
 /*
   constructor for main Plane class
  */
