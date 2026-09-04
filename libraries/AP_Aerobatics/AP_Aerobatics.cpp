@@ -19,9 +19,33 @@
 // most repetitions we will accept in one command
 #define AEROBATICS_REPS_MAX             5
 
-// how long EXIT holds a zero rate demand before the pilot gets the
-// sticks back, so the roll is stopped rather than still turning
-#define AEROBATICS_EXIT_MS            250
+/*
+  ENTRY and EXIT both fly an attitude to a target, which the rate
+  controllers below need as a rate demand. One proportional gain, in
+  1/s, converts the remaining attitude error in degrees into deg/s.
+
+  This duplicates ArduPlane's own attitude loop, which uses
+  angle_err_deg / gains.tau (RLL2SRV_TCONST, default 0.5s, so 2.0).
+  AUTOTUNE adjusts tau and will not adjust this. See PLAN.md stage 7.
+ */
+#define AEROBATICS_LEVEL_P             2.0
+#define AEROBATICS_PITCH_RATE_MAX     45.0   // deg/s
+#define AEROBATICS_LEVEL_ROLL_RATE_MAX 90.0  // deg/s
+
+// ENTRY is done at this much of AEROB_PITCH, EXIT when both axes are
+// this close to level and the roll has actually stopped
+#define AEROBATICS_ENTRY_PITCH_TOL     3.0   // deg
+#define AEROBATICS_EXIT_TOL            5.0   // deg
+#define AEROBATICS_EXIT_RATE_TOL      20.0   // deg/s
+
+/*
+  bounds on the two attitude-seeking states, so neither can hang if the
+  target is never reached -- a nose-up target the aircraft cannot hold,
+  or a level-off fighting a trim offset. Reaching one is not an abort,
+  it just moves the machine on. Stage 6 adds the real abort triggers.
+ */
+#define AEROBATICS_ENTRY_MS_MAX       3000
+#define AEROBATICS_EXIT_MS_MAX        2000
 
 // entry envelope. Margin over AIRSPEED_MIN, and how far from level the
 // aircraft may be when the command arrives.
@@ -112,19 +136,14 @@ bool AP_Aerobatics::update(float dt, Output &out)
         return false;
     }
 
-    /*
-      integrate the body-axis roll rate. Do NOT accumulate deltas of
-      ahrs.roll: that wraps at +-180 so passing through inverted jumps
-      the count backwards by nearly a turn and the maneuver never ends,
-      and Euler roll rate carries a tan(pitch) term that is already
-      wrong at the entry pitch and singular at 90 degrees.
-     */
-    roll_accumulated += AP::ahrs().get_gyro().x * dt;
+    const AP_AHRS &ahrs = AP::ahrs();
 
     // zero unless a state below asks for something, so a state that
     // commands nothing hands back level rather than a stale demand
     out.roll_rate_dps = 0;
     out.pitch_rate_dps = 0;
+
+    const uint32_t state_elapsed = AP_HAL::millis() - state_ms;
 
     switch (state) {
 
@@ -132,33 +151,87 @@ bool AP_Aerobatics::update(float dt, Output &out)
         // unreachable, handled above
         break;
 
-    case State::ENTRY:
-        // stage 5 pitches up to AEROB_PITCH here; for now the roll
-        // starts as soon as the command is accepted
-        set_state(State::ROLLING);
-        FALLTHROUGH;
+    case State::ENTRY: {
+        /*
+          raise the nose to AEROB_PITCH before rolling, so the aircraft
+          spends the roll descending back through level rather than
+          starting there and finishing well below it.
+         */
+        const float pitch_err = radians(pitch.get()) - ahrs.get_pitch_rad();
+        out.pitch_rate_dps = constrain_float(degrees(pitch_err) * AEROBATICS_LEVEL_P,
+                                             -AEROBATICS_PITCH_RATE_MAX,
+                                             AEROBATICS_PITCH_RATE_MAX);
+        // hold the wings level on the way up
+        out.roll_rate_dps = constrain_float(-degrees(ahrs.get_roll_rad()) * AEROBATICS_LEVEL_P,
+                                            -AEROBATICS_LEVEL_ROLL_RATE_MAX,
+                                            AEROBATICS_LEVEL_ROLL_RATE_MAX);
 
-    case State::ROLLING: {
-        out.roll_rate_dps = current.direction * current.rate_dps;
-        if (fabsf(roll_accumulated) >= current.reps * M_2PI) {
-            out.roll_rate_dps = 0;
-            exit_ms = AP_HAL::millis();
-            set_state(State::EXIT);
+        if (fabsf(pitch_err) <= radians(AEROBATICS_ENTRY_PITCH_TOL) ||
+            state_elapsed >= AEROBATICS_ENTRY_MS_MAX) {
+            /*
+              the count starts here, not at command time: levelling the
+              wings during ENTRY turns the aircraft about the roll axis
+              too, and that rotation is not part of the maneuver.
+             */
+            roll_accumulated = 0;
+            set_state(State::ROLLING);
         }
         break;
     }
 
-    case State::EXIT:
-        // hold the zero demand briefly: handing back mid-rotation
-        // leaves acro_locking to hold whatever bank it inherits
-        if (AP_HAL::millis() - exit_ms >= AEROBATICS_EXIT_MS) {
-            gcs().send_text(MAV_SEVERITY_INFO, "AERO: done, roll=%.0f pitch=%.0f",
+    case State::ROLLING:
+        /*
+          integrate the body-axis roll rate. Do NOT accumulate deltas of
+          ahrs.roll: that wraps at +-180 so passing through inverted
+          jumps the count backwards by nearly a turn and the maneuver
+          never ends, and Euler roll rate carries a tan(pitch) term that
+          is already wrong at the entry pitch and singular at 90 degrees.
+         */
+        roll_accumulated += ahrs.get_gyro().x * dt;
+
+        // a pure aileron roll holds neutral elevator, so pitch rate
+        // stays at the zero set above
+        out.roll_rate_dps = current.direction * current.rate_dps;
+
+        if (fabsf(roll_accumulated) >= current.reps * M_2PI) {
+            out.roll_rate_dps = 0;
+            set_state(State::EXIT);
+        }
+        break;
+
+    case State::EXIT: {
+        /*
+          fly back to level on both axes. get_roll_rad() is already
+          wrapped to +-180, so negating it is the shortest way round.
+         */
+        const float roll_err = -ahrs.get_roll_rad();
+        const float pitch_err = -ahrs.get_pitch_rad();
+        out.roll_rate_dps = constrain_float(degrees(roll_err) * AEROBATICS_LEVEL_P,
+                                            -AEROBATICS_LEVEL_ROLL_RATE_MAX,
+                                            AEROBATICS_LEVEL_ROLL_RATE_MAX);
+        out.pitch_rate_dps = constrain_float(degrees(pitch_err) * AEROBATICS_LEVEL_P,
+                                             -AEROBATICS_PITCH_RATE_MAX,
+                                             AEROBATICS_PITCH_RATE_MAX);
+
+        /*
+          the rate condition matters as much as the angles: roll passes
+          through level at full rate on the way out, and handing back
+          there leaves acro_locking to hold whatever bank it inherits.
+         */
+        const bool level = fabsf(roll_err) <= radians(AEROBATICS_EXIT_TOL) &&
+                           fabsf(pitch_err) <= radians(AEROBATICS_EXIT_TOL) &&
+                           fabsf(ahrs.get_gyro().x) <= radians(AEROBATICS_EXIT_RATE_TOL);
+
+        if (level || state_elapsed >= AEROBATICS_EXIT_MS_MAX) {
+            gcs().send_text(MAV_SEVERITY_INFO, "AERO: done, roll=%.0f roll_err=%.0f pitch=%.0f",
                             double(degrees(roll_accumulated)),
-                            double(degrees(AP::ahrs().get_pitch_rad())));
+                            double(degrees(roll_err)),
+                            double(degrees(ahrs.get_pitch_rad())));
             set_state(State::IDLE);
             return false;
         }
         break;
+    }
 
     case State::ABORT:
         // stage 6 fills this in; nothing reaches it yet
@@ -237,6 +310,8 @@ void AP_Aerobatics::set_state(State s)
         return;
     }
     state = s;
+    // ENTRY and EXIT are both bounded, so every state needs its start time
+    state_ms = AP_HAL::millis();
     gcs().send_text(MAV_SEVERITY_INFO, "AERO: %s", state_name(s));
 }
 

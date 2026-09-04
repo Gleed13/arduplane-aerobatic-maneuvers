@@ -132,13 +132,13 @@ private:
 
     State state = State::IDLE;
 
-    // body-axis roll since the maneuver started, radians, signed with
-    // the commanded direction
+    // body-axis roll since ROLLING began, radians, signed with the
+    // commanded direction. Zeroed there rather than at command time so
+    // the ENTRY wings-levelling does not count toward the rotation.
     float roll_accumulated = 0;
 
-    // when EXIT began, for the settle time before the pilot gets the
-    // sticks back
-    uint32_t exit_ms = 0;
+    // when the current state began, for the ENTRY and EXIT time bounds
+    uint32_t state_ms = 0;
 
     // the running request
     struct {

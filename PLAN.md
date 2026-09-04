@@ -3,7 +3,7 @@
 Implementation plan for the automatic aileron roll. Companion to `CLAUDE.md`, which holds
 the settled design decisions; this file holds the order of work.
 
-Status: simulation setup is done and flown. Stages 1-4 done; next is stage 5.
+Status: simulation setup is done and flown. Stages 1-5 done; next is stage 6.
 
 ## Corrections — applied
 
@@ -160,6 +160,35 @@ will not reset it for you. Reset explicitly on mode exit rather than assuming.
 
 `AUTOTUNE` first — stock gains do not fly the Extra 300L well and the rate controller must
 track before any of the numbers mean anything. Then sweep `AEROB_RATE`.
+
+**Take the level-off gain from the plane, not from a constant.** `AEROBATICS_LEVEL_P` (2.0)
+duplicates ArduPlane's own attitude loop, which computes the same thing as
+`angle_err_deg / gains.tau` in `AP_RollController.cpp` and `AP_PitchController.cpp`.
+`gains.tau` is `RLL2SRV_TCONST` / `PTCH2SRV_TCONST`, default 0.5 s — so ArduPlane's default
+is exactly 1/0.5 = 2.0, and the constant matches only by luck.
+
+It matters here specifically: `AUTOTUNE` *adjusts* `tau`. Run it and the plane's attitude
+loop retunes itself while ENTRY and EXIT go on using 2.0.
+
+`gains` is `protected` in `AP_FW_Controller.h` with no accessor, so neither the library nor
+the ACRO hook can read `tau` today. Two ways out:
+
+- add a one-line `get_tau()` accessor and pass `1/tau` into `update()` — minimal, but
+  modifies a shared upstream library for one consumer
+- have ENTRY and EXIT drive the *angle* controllers instead of returning rates. Better
+  shape, and the precedent is already in `mode_acro.cpp`: acro locking calls
+  `rollController.get_servo_out(angle_err_cd, ...)` when the stick is centred and
+  `get_rate_out(rate, ...)` when it is not. ENTRY and EXIT are attitude-holding phases and
+  ROLLING is a rate phase, so the same split fits. Gets `tau`, `RMAX` and the full PID for
+  free and deletes three constants.
+
+Cost of the second: `Output` stops being two plain rates — it has to say whether each axis
+is an angle or a rate demand, and the hook dispatches on that. Roughly 30 lines across the
+library and the hook, plus a re-fly to confirm ENTRY and EXIT still finish on their
+attitude conditions rather than their time bounds.
+
+`AEROBATICS_PITCH_RATE_MAX` and `AEROBATICS_LEVEL_ROLL_RATE_MAX` are *not* redundant the
+same way: the matching `*2SRV_RMAX` parameters default to 0, which means no limit.
 
 ### Stretch — loop
 
